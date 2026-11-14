@@ -40,6 +40,59 @@ public class AuthenticationSessionServiceTests
     }
 
     [Test]
+    public void SaveSessionAsync_WhenStorageThrows_ShouldRollbackInMemoryStateAndThrow()
+    {
+        var user = new AuthUser(Guid.NewGuid(), "student@example.com", "STUDENT", "LOCAL", true);
+        _storage.ThrowOnSet = true;
+        var eventFired = false;
+        _service.CurrentUserChanged += (_, _) => eventFired = true;
+
+        var ex = Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await _service.SaveSessionAsync("valid-access-token", "valid-refresh-token", user));
+
+        Assert.That(ex?.Message, Is.EqualTo("SecureStorage error"));
+        Assert.That(_service.IsAuthenticated, Is.False);
+        Assert.That(_service.CurrentUser, Is.Null);
+        Assert.That(eventFired, Is.False);
+    }
+
+    [Test]
+    public async Task SaveSessionAsync_WhenPreviousSessionExistsAndStorageThrows_ShouldRollbackToPreviousSession()
+    {
+        var initialUser = new AuthUser(Guid.NewGuid(), "initial@example.com", "STUDENT", "LOCAL", true);
+        await _service.SaveSessionAsync("initial-access", "initial-refresh", initialUser);
+
+        _storage.ThrowOnSet = true;
+        var newUser = new AuthUser(Guid.NewGuid(), "new@example.com", "LANDLORD", "LOCAL", true);
+
+        Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await _service.SaveSessionAsync("new-access", "new-refresh", newUser));
+
+        Assert.That(_service.IsAuthenticated, Is.True);
+        Assert.That(_service.CurrentUser, Is.EqualTo(initialUser));
+        Assert.That(await _service.GetAccessTokenAsync(), Is.EqualTo("initial-access"));
+        Assert.That(await _service.GetRefreshTokenAsync(), Is.EqualTo("initial-refresh"));
+    }
+
+    [Test]
+    public async Task SaveSessionAsync_WhenNewSessionHasNoRefreshToken_ShouldRemovePreviousRefreshToken()
+    {
+        var userA = new AuthUser(Guid.NewGuid(), "userA@example.com", "STUDENT", "LOCAL", true);
+        await _service.SaveSessionAsync("token-A", "refresh-token-A", userA);
+
+        Assert.That(await _storage.GetAsync(AuthenticationSessionService.RefreshTokenKey), Is.EqualTo("refresh-token-A"));
+
+        // Account B logs in without a refresh token
+        var userB = new AuthUser(Guid.NewGuid(), "userB@example.com", "LANDLORD", "GOOGLE", true);
+        await _service.SaveSessionAsync("token-B", string.Empty, userB);
+
+        Assert.That(_service.CurrentUser?.Email, Is.EqualTo("userB@example.com"));
+        Assert.That(await _storage.GetAsync(AuthenticationSessionService.AccessTokenKey), Is.EqualTo("token-B"));
+        Assert.That(await _storage.GetAsync(AuthenticationSessionService.RefreshTokenKey), Is.Null);
+        Assert.That(await _service.GetRefreshTokenAsync(), Is.Null);
+    }
+
+    [Test]
     public async Task TryRestoreSessionAsync_WhenAccessTokenIsValid_ShouldRestoreSessionWithoutCallingBackend()
     {
         var user = new AuthUser(Guid.NewGuid(), "student@example.com", "STUDENT", "LOCAL", true);
@@ -143,12 +196,18 @@ public class AuthenticationSessionServiceTests
     private sealed class InMemorySecureStorageService : ISecureStorageService
     {
         private readonly Dictionary<string, string> _dict = new();
+        public bool ThrowOnSet { get; set; }
 
         public Task<string?> GetAsync(string key) =>
             Task.FromResult(_dict.TryGetValue(key, out var val) ? val : null);
 
         public Task SetAsync(string key, string value)
         {
+            if (ThrowOnSet)
+            {
+                throw new InvalidOperationException("SecureStorage error");
+            }
+
             _dict[key] = value;
             return Task.CompletedTask;
         }

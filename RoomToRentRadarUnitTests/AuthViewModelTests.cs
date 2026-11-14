@@ -224,6 +224,31 @@ public class AuthViewModelTests
     }
 
     [Test]
+    public async Task SignInAsync_WhenSaveSessionThrows_ShouldSetErrorAndNotConfirmSuccess()
+    {
+        var user = new AuthUser(Guid.NewGuid(), "student@example.com", "STUDENT", "LOCAL", true);
+        _authPort.LoginResult = AuthResult.Success("test-access-token", "test-refresh-token", user);
+        _sessionService.ThrowOnSave = true;
+
+        _viewModel.LoginEmail = "student@example.com";
+        _viewModel.LoginPassword = "ValidPassword1";
+
+        AuthUser? callbackUser = null;
+        _viewModel.OnAuthenticationSuccessHandler = u =>
+        {
+            callbackUser = u;
+            return Task.CompletedTask;
+        };
+
+        await _viewModel.SignInAsync(CancellationToken.None);
+
+        Assert.That(_viewModel.IsSuccess, Is.False);
+        Assert.That(_viewModel.HasError, Is.True);
+        Assert.That(_viewModel.ErrorMessage, Does.Contain("Storage failure"));
+        Assert.That(callbackUser, Is.Null);
+    }
+
+    [Test]
     public async Task SignUpAsync_WhenSuccessful_ShouldClearAllFormFieldsAndCallFlipToLoginHandler()
     {
         // Simulate previous failed login input left on the form
@@ -429,6 +454,7 @@ public class AuthViewModelTests
         public string? SavedAccessToken { get; private set; }
         public string? SavedRefreshToken { get; private set; }
         public AuthUser? SavedUser { get; private set; }
+        public bool ThrowOnSave { get; set; }
 
         public bool IsAuthenticated => SavedUser != null && !string.IsNullOrWhiteSpace(SavedAccessToken);
         public AuthUser? CurrentUser => SavedUser;
@@ -437,6 +463,11 @@ public class AuthViewModelTests
 
         public Task SaveSessionAsync(string accessToken, string refreshToken, AuthUser user, CancellationToken cancellationToken = default)
         {
+            if (ThrowOnSave)
+            {
+                throw new InvalidOperationException("Storage failure");
+            }
+
             SavedAccessToken = accessToken;
             SavedRefreshToken = refreshToken;
             SavedUser = user;

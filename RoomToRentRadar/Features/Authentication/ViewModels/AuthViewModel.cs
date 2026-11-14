@@ -200,12 +200,12 @@ public partial class AuthViewModel : ObservableObject
             var result = await _authenticationPort.LoginWithEmailAsync(request, cancellationToken);
             if (result.IsSuccess)
             {
-                SetSuccess("Signed in successfully!");
-
                 if (!string.IsNullOrWhiteSpace(result.AccessToken) && result.User != null)
                 {
                     await _sessionService.SaveSessionAsync(result.AccessToken, result.RefreshToken ?? string.Empty, result.User, cancellationToken);
                 }
+
+                SetSuccess("Signed in successfully!");
 
                 if (OnAuthenticationSuccessHandler != null && result.User != null)
                 {
@@ -297,12 +297,12 @@ public partial class AuthViewModel : ObservableObject
 
             if (result.IsSuccess)
             {
-                SetSuccess("Google sign-in successful!");
-
                 if (!string.IsNullOrWhiteSpace(result.AccessToken) && result.User != null)
                 {
                     await _sessionService.SaveSessionAsync(result.AccessToken, result.RefreshToken ?? string.Empty, result.User, cancellationToken);
                 }
+
+                SetSuccess("Google sign-in successful!");
 
                 if (OnAuthenticationSuccessHandler != null && result.User != null)
                 {
@@ -361,12 +361,13 @@ public partial class AuthViewModel : ObservableObject
             {
                 IsRoleSelectionDialogOpen = false;
                 PendingGoogleIdToken = null;
-                SetSuccess("Account created and signed in with Google!");
 
                 if (!string.IsNullOrWhiteSpace(result.AccessToken) && result.User != null)
                 {
                     await _sessionService.SaveSessionAsync(result.AccessToken, result.RefreshToken ?? string.Empty, result.User, cancellationToken);
                 }
+
+                SetSuccess("Account created and signed in with Google!");
 
                 if (OnAuthenticationSuccessHandler != null && result.User != null)
                 {

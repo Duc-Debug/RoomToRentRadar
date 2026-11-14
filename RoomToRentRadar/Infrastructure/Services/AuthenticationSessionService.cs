@@ -41,9 +41,10 @@ public class AuthenticationSessionService : IAuthenticationSessionService
     {
         ArgumentNullException.ThrowIfNull(user);
 
-        _cachedAccessToken = accessToken;
-        _cachedRefreshToken = refreshToken;
-        _currentUser = user;
+        // Snapshot current in-memory state in case of rollback
+        var prevAccessToken = _cachedAccessToken;
+        var prevRefreshToken = _cachedRefreshToken;
+        var prevUser = _currentUser;
 
         try
         {
@@ -51,18 +52,72 @@ public class AuthenticationSessionService : IAuthenticationSessionService
             {
                 await _secureStorage.SetAsync(AccessTokenKey, accessToken);
             }
+            else
+            {
+                _secureStorage.Remove(AccessTokenKey);
+            }
 
             if (!string.IsNullOrWhiteSpace(refreshToken))
             {
                 await _secureStorage.SetAsync(RefreshTokenKey, refreshToken);
             }
+            else
+            {
+                // Ensure old refresh token from previous account is wiped when switching accounts
+                _secureStorage.Remove(RefreshTokenKey);
+            }
 
             var serializedUser = JsonSerializer.Serialize(user);
             await _secureStorage.SetAsync(UserDataKey, serializedUser);
+
+            // Successfully persisted to secure storage, now update memory state
+            _cachedAccessToken = accessToken;
+            _cachedRefreshToken = refreshToken;
+            _currentUser = user;
         }
         catch (Exception)
         {
-            // Storage error fallback, in-memory state still holds
+            // Rollback in-memory state
+            _cachedAccessToken = prevAccessToken;
+            _cachedRefreshToken = prevRefreshToken;
+            _currentUser = prevUser;
+
+            // Revert storage keys to previous snapshot or remove
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(prevAccessToken))
+                {
+                    await _secureStorage.SetAsync(AccessTokenKey, prevAccessToken);
+                }
+                else
+                {
+                    _secureStorage.Remove(AccessTokenKey);
+                }
+
+                if (!string.IsNullOrWhiteSpace(prevRefreshToken))
+                {
+                    await _secureStorage.SetAsync(RefreshTokenKey, prevRefreshToken);
+                }
+                else
+                {
+                    _secureStorage.Remove(RefreshTokenKey);
+                }
+
+                if (prevUser != null)
+                {
+                    await _secureStorage.SetAsync(UserDataKey, JsonSerializer.Serialize(prevUser));
+                }
+                else
+                {
+                    _secureStorage.Remove(UserDataKey);
+                }
+            }
+            catch
+            {
+                // Suppress secondary cleanup exceptions to let original exception propagate
+            }
+
+            throw;
         }
 
         CurrentUserChanged?.Invoke(this, _currentUser);
