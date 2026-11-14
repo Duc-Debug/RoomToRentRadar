@@ -35,20 +35,28 @@ public class AuthenticationHeaderHandler : DelegatingHandler
 
         var response = await base.SendAsync(request, cancellationToken);
 
-        // If unauthorized and we had a token, try refreshing and retrying once
+        // If unauthorized and we had a token, only retry if request body can be safely reproduced
         if (response.StatusCode == HttpStatusCode.Unauthorized && !string.IsNullOrWhiteSpace(token))
         {
-            var refreshed = await _sessionService.RefreshTokenAsync(cancellationToken);
-            if (refreshed)
+            if (CanRetryRequest(request))
             {
-                var newToken = await _sessionService.GetAccessTokenAsync(cancellationToken);
-                if (!string.IsNullOrWhiteSpace(newToken))
+                var refreshed = await _sessionService.RefreshTokenAsync(cancellationToken);
+                if (refreshed)
                 {
-                    using var clonedRequest = await CloneHttpRequestMessageAsync(request, cancellationToken);
-                    clonedRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", newToken);
-
-                    response.Dispose();
-                    return await base.SendAsync(clonedRequest, cancellationToken);
+                    var newToken = await _sessionService.GetAccessTokenAsync(cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(newToken))
+                    {
+                        var clonedRequest = await CloneHttpRequestMessageAsync(request, cancellationToken);
+                        if (clonedRequest != null)
+                        {
+                            using (clonedRequest)
+                            {
+                                clonedRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", newToken);
+                                response.Dispose();
+                                return await base.SendAsync(clonedRequest, cancellationToken);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -56,7 +64,25 @@ public class AuthenticationHeaderHandler : DelegatingHandler
         return response;
     }
 
-    private static async Task<HttpRequestMessage> CloneHttpRequestMessageAsync(
+    private static bool CanRetryRequest(HttpRequestMessage request)
+    {
+        if (request.Content == null)
+        {
+            return true;
+        }
+
+        try
+        {
+            var stream = request.Content.ReadAsStream();
+            return stream.CanSeek;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<HttpRequestMessage?> CloneHttpRequestMessageAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
@@ -67,9 +93,28 @@ public class AuthenticationHeaderHandler : DelegatingHandler
 
         if (request.Content != null)
         {
+            Stream stream;
+            try
+            {
+                stream = await request.Content.ReadAsStreamAsync(cancellationToken);
+            }
+            catch
+            {
+                clone.Dispose();
+                return null;
+            }
+
+            if (!stream.CanSeek)
+            {
+                clone.Dispose();
+                return null;
+            }
+
+            stream.Position = 0;
             var ms = new MemoryStream();
-            await request.Content.CopyToAsync(ms, cancellationToken);
+            await stream.CopyToAsync(ms, cancellationToken);
             ms.Position = 0;
+            stream.Position = 0;
             clone.Content = new StreamContent(ms);
 
             foreach (var header in request.Content.Headers)
