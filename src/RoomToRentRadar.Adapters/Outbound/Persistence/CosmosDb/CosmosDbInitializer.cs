@@ -40,9 +40,16 @@ public sealed class CosmosDbInitializer
                 new ContainerProperties(_settings.CampusesContainerName, "/id"),
                 cancellationToken: cancellationToken);
 
-            _logger.LogInformation("Creating container '{RoomsContainerName}' (/campusId)...", _settings.ContainerName);
+            var roomDetailsContainerName = string.IsNullOrWhiteSpace(_settings.RoomDetailsContainerName) ? "RoomDetails" : _settings.RoomDetailsContainerName;
+            _logger.LogInformation("Creating container '{RoomDetailsContainerName}' (/id)...", roomDetailsContainerName);
+            var roomDetailsContainerResponse = await database.CreateContainerIfNotExistsAsync(
+                new ContainerProperties(roomDetailsContainerName, "/id"),
+                cancellationToken: cancellationToken);
+
+            var listingsContainerName = string.IsNullOrWhiteSpace(_settings.ContainerName) ? "RoomListings" : _settings.ContainerName;
+            _logger.LogInformation("Creating container '{ListingsContainerName}' (/campusId)...", listingsContainerName);
             var roomsContainerResponse = await database.CreateContainerIfNotExistsAsync(
-                new ContainerProperties(_settings.ContainerName, "/campusId"),
+                new ContainerProperties(listingsContainerName, "/campusId"),
                 cancellationToken: cancellationToken);
 
             var effectiveContainer = roomsContainerResponse.Container;
@@ -54,18 +61,21 @@ public sealed class CosmosDbInitializer
                 _logger.LogWarning(
                     "Cosmos container '{ContainerName}' currently uses legacy partition key '{PartitionKeyPath}' instead of required '/campusId'. " +
                     "Cosmos DB does not allow in-place partition key changes. Initiating safe zero-data-loss migration...",
-                    _settings.ContainerName,
+                    listingsContainerName,
                     partitionKeyPath);
 
                 var migrationResult = await SafeMigrateToNewContainerAsync(
                     database,
                     effectiveContainer,
-                    _settings.ContainerName,
+                    listingsContainerName,
                     cancellationToken);
 
                 effectiveContainer = migrationResult.Container;
                 effectiveProperties = migrationResult.Resource;
             }
+
+            // Automatic cutover migration from legacy "Rooms" container if it exists
+            await MigrateLegacyRoomsContainerIfPresentAsync(database, effectiveContainer, roomDetailsContainerResponse.Container, cancellationToken);
 
             await EnsureSpatialAndCompositeIndexesAsync(effectiveContainer, effectiveProperties, cancellationToken);
 
@@ -77,6 +87,78 @@ public sealed class CosmosDbInitializer
         {
             _logger.LogError(ex, "Failed to initialize Cosmos DB.");
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Checks for a legacy 'Rooms' container (from earlier versions using /id) and copies documents
+    /// to 'RoomListings' (/campusId) and 'RoomDetails' (/id) without deleting 'Rooms'.
+    /// </summary>
+    private async Task MigrateLegacyRoomsContainerIfPresentAsync(
+        Database database,
+        Container listingsContainer,
+        Container roomDetailsContainer,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var legacyRoomsContainer = database.GetContainer("Rooms");
+            var legacyProperties = await legacyRoomsContainer.ReadContainerAsync(cancellationToken: cancellationToken);
+            if (legacyProperties?.Resource is null)
+            {
+                return;
+            }
+
+            // Only migrate if the target containers are currently empty
+            var countQuery = new QueryDefinition("SELECT VALUE COUNT(1) FROM c");
+            using var countIterator = listingsContainer.GetItemQueryIterator<int>(countQuery);
+            if (countIterator.HasMoreResults)
+            {
+                var countRes = await countIterator.ReadNextAsync(cancellationToken);
+                if (countRes.FirstOrDefault() > 0)
+                {
+                    return; // Already populated
+                }
+            }
+
+            _logger.LogInformation("Legacy 'Rooms' container detected. Copying documents to 'RoomListings' and 'RoomDetails' (legacy container preserved)...");
+            var migratedCount = 0;
+            using var feedIterator = legacyRoomsContainer.GetItemQueryIterator<Newtonsoft.Json.Linq.JObject>(new QueryDefinition("SELECT * FROM c"));
+            while (feedIterator.HasMoreResults)
+            {
+                var batch = await feedIterator.ReadNextAsync(cancellationToken);
+                foreach (var doc in batch)
+                {
+                    var id = doc["id"]?.ToString();
+                    var campusId = doc["campusId"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(campusId))
+                    {
+                        campusId = "campus-ictu";
+                        doc["campusId"] = campusId;
+                    }
+
+                    // Copy to RoomListings (/campusId)
+                    await listingsContainer.UpsertItemAsync(doc, new PartitionKey(campusId), cancellationToken: cancellationToken);
+
+                    // Copy to RoomDetails (/id)
+                    if (!string.IsNullOrWhiteSpace(id))
+                    {
+                        await roomDetailsContainer.UpsertItemAsync(doc, new PartitionKey(id), cancellationToken: cancellationToken);
+                    }
+
+                    migratedCount++;
+                }
+            }
+
+            _logger.LogInformation("Successfully copied {Count} documents from legacy 'Rooms' container. Both target containers are now populated and 'Rooms' is intact.", migratedCount);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // Legacy container does not exist; no action needed.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to copy from legacy 'Rooms' container. Target containers remain functional.");
         }
     }
 

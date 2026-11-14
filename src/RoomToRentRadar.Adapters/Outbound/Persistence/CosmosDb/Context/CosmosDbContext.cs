@@ -149,7 +149,7 @@ public sealed class CosmosDbContext : ICosmosDbContext
 
         var database = databaseResponse.Database;
 
-        var roomsContainerName = string.IsNullOrWhiteSpace(_options.ContainerName) ? "Rooms" : _options.ContainerName;
+        var roomsContainerName = string.IsNullOrWhiteSpace(_options.ContainerName) ? "RoomListings" : _options.ContainerName;
         await database.CreateContainerIfNotExistsAsync(roomsContainerName, "/campusId", cancellationToken: cancellationToken);
 
         var roomDetailsContainerName = string.IsNullOrWhiteSpace(_options.RoomDetailsContainerName) ? "RoomDetails" : _options.RoomDetailsContainerName;

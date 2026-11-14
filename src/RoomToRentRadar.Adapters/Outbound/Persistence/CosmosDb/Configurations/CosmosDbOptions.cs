@@ -12,7 +12,7 @@ public sealed class CosmosDbOptions
 
     public string DatabaseName { get; set; } = "RoomToRentRadarDb";
 
-    public string ContainerName { get; set; } = "Rooms";
+    public string ContainerName { get; set; } = "RoomListings";
 
     public string RoomDetailsContainerName { get; set; } = "RoomDetails";
 

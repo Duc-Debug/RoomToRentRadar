@@ -140,6 +140,54 @@ public class RoomListingsApplicationPerformanceTests
         });
     }
 
+    [Test]
+    public async Task MultiPagePagination_FirstMiddleAndLastPages_ShouldHaveZeroOverlappingAndCorrectCounts()
+    {
+        // Seed 500 listings
+        for (var i = 1; i <= 500; i++)
+        {
+            var offset = i * 0.0005;
+            var room = new RoomListing(
+                $"room-scale-{i:D4}",
+                $"Phòng trọ #{i}",
+                "Mô tả",
+                new Money(2000000 + (i * 5000)),
+                20.0 + (i % 10),
+                "Địa chỉ",
+                new GeoLocation(21.5852 + offset, 105.8074 + offset),
+                ListingRoomStatus.Available,
+                VerificationStatus.Verified,
+                "campus-ictu");
+
+            await _repository.AddAsync(room);
+        }
+
+        // Query First Page (Page 1), Middle Page (Page 13), and Last Page (Page 25) with PageSize 20
+        var firstPage = await _useCase.ExecuteAsync(new GetRoomListingsQuery("campus-ictu", Page: 1, PageSize: 20));
+        var middlePage = await _useCase.ExecuteAsync(new GetRoomListingsQuery("campus-ictu", Page: 13, PageSize: 20));
+        var lastPage = await _useCase.ExecuteAsync(new GetRoomListingsQuery("campus-ictu", Page: 25, PageSize: 20));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(firstPage.TotalCount, Is.EqualTo(500));
+            Assert.That(middlePage.TotalCount, Is.EqualTo(500));
+            Assert.That(lastPage.TotalCount, Is.EqualTo(500));
+
+            Assert.That(firstPage.Items, Has.Count.EqualTo(20));
+            Assert.That(middlePage.Items, Has.Count.EqualTo(20));
+            Assert.That(lastPage.Items, Has.Count.EqualTo(20));
+
+            var firstIds = firstPage.Items.Select(x => x.Id).ToHashSet();
+            var middleIds = middlePage.Items.Select(x => x.Id).ToHashSet();
+            var lastIds = lastPage.Items.Select(x => x.Id).ToHashSet();
+
+            // Zero overlap between first, middle, and last page
+            Assert.That(firstIds.Overlaps(middleIds), Is.False, "First page and middle page must not overlap");
+            Assert.That(middleIds.Overlaps(lastIds), Is.False, "Middle page and last page must not overlap");
+            Assert.That(firstIds.Overlaps(lastIds), Is.False, "First page and last page must not overlap");
+        });
+    }
+
     private sealed class FakeRoomListingRepository : IRoomListingRepository
     {
         private readonly List<RoomListing> _rooms = [];

@@ -57,7 +57,13 @@ public sealed class CosmosRoomListingRepository : IRoomListingRepository
         }
 
         var direction = descending ? "DESC" : "ASC";
-        // Stable pagination: include c.id as a tie-breaker for deterministic pagination across pages
+        // Stable pagination: include c.id as a tie-breaker for deterministic pagination across pages.
+        // NOTE ON SPATIAL DISTANCE ORDERING:
+        // Azure Cosmos DB SQL Engine explicitly disallows combining ST_DISTANCE with other fields in the ORDER BY clause.
+        // Attempting 'ORDER BY ST_DISTANCE(...), c.id' throws a runtime BadRequestException:
+        // "Queries that have an ST_DISTANCE expression in the ORDER BY clause cannot contain any other properties in the ORDER BY clause."
+        // Hence, spatial distance sorting queries use ST_DISTANCE alone, and the Application Use Case performs
+        // a secondary deterministic tie-break by listing Id on equal-distance items.
         var (orderByClause, requiresLocationParam) = sortBy switch
         {
             "price" => ($"ORDER BY c.monthlyRentAmount {direction}, c.id {direction}", false),
