@@ -263,6 +263,38 @@ public class SearchRoomsUseCaseTests
         });
     }
 
+    [Test]
+    public async Task ExecuteAsync_WhenKeywordHasLeadingOrTrailingWhitespace_ShouldTrimKeywordPassedToRepository()
+    {
+        var room = CreateValidRoom("1", 2000000m, 25.0, true, RoomStatus.Available);
+        _roomRepository.Add(room);
+
+        var query = new SearchRoomsQuery(keyword: "  Phòng 1  ");
+
+        var result = await _useCase.ExecuteAsync(query);
+
+        Assert.That(_roomRepository.CapturedQuery, Is.Not.Null);
+        Assert.That(_roomRepository.CapturedQuery!.Keyword, Is.EqualTo("Phòng 1"));
+        Assert.That(result.ActiveFilters, Does.Contain("Keyword"));
+        Assert.That(result.Items, Has.Count.EqualTo(1));
+    }
+
+    [Test]
+    public async Task ExecuteAsync_WhenKeywordIsWhitespaceOnly_ShouldSetKeywordToNullAndNotIncludeInActiveFilters()
+    {
+        var room = CreateValidRoom("1", 2000000m, 25.0, true, RoomStatus.Available);
+        _roomRepository.Add(room);
+
+        var query = new SearchRoomsQuery(keyword: "   ");
+
+        var result = await _useCase.ExecuteAsync(query);
+
+        Assert.That(_roomRepository.CapturedQuery, Is.Not.Null);
+        Assert.That(_roomRepository.CapturedQuery!.Keyword, Is.Null);
+        Assert.That(result.ActiveFilters, Does.Not.Contain("Keyword"));
+        Assert.That(result.Items, Has.Count.EqualTo(1));
+    }
+
     private static Room CreateValidRoom(
         string id,
         decimal price,
@@ -289,6 +321,8 @@ public class SearchRoomsUseCaseTests
     {
         private readonly List<Room> _rooms = [];
 
+        public SearchRoomsQuery? CapturedQuery { get; private set; }
+
         public void Add(Room room) => _rooms.Add(room);
 
         public Task<Room?> GetByIdAsync(string id, CancellationToken cancellationToken = default)
@@ -305,6 +339,7 @@ public class SearchRoomsUseCaseTests
             SearchRoomsQuery query,
             CancellationToken ct = default)
         {
+            CapturedQuery = query;
             var filtered = _rooms.AsEnumerable();
 
             if (query.MinPrice.HasValue)

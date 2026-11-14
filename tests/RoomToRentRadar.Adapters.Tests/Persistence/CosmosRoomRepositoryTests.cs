@@ -2,6 +2,7 @@ using Microsoft.Azure.Cosmos;
 using Moq;
 using RoomToRentRadar.Adapters.Outbound.Persistence.CosmosDb.Documents;
 using RoomToRentRadar.Adapters.Outbound.Persistence.CosmosDb.Repositories;
+using RoomToRentRadar.Application.DTOs;
 using RoomToRentRadar.Domain.Entities;
 
 namespace RoomToRentRadar.Adapters.Tests.Persistence;
@@ -145,5 +146,82 @@ public class CosmosRoomRepositoryTests
             Assert.That(room.Longitude, Is.EqualTo(105.8542));
             Assert.That(room.Latitude, Is.EqualTo(21.0285));
         });
+    }
+
+    [Test]
+    public async Task SearchAsync_WhenKeywordHasWhitespace_ShouldBindTrimmedKeywordParameter()
+    {
+        // Arrange
+        QueryDefinition? capturedQueryDef = null;
+
+        var feedResponseMock = new Mock<FeedResponse<int>>();
+        feedResponseMock.Setup(r => r.GetEnumerator()).Returns(new List<int> { 0 }.GetEnumerator());
+
+        var feedIteratorMock = new Mock<FeedIterator<int>>();
+        feedIteratorMock.SetupSequence(i => i.HasMoreResults)
+            .Returns(true)
+            .Returns(false);
+        feedIteratorMock.Setup(i => i.ReadNextAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(feedResponseMock.Object);
+
+        _containerMock
+            .Setup(c => c.GetItemQueryIterator<int>(
+                It.IsAny<QueryDefinition>(),
+                It.IsAny<string>(),
+                It.IsAny<QueryRequestOptions>()))
+            .Callback<QueryDefinition, string, QueryRequestOptions>((qd, _, _) =>
+            {
+                capturedQueryDef = qd;
+            })
+            .Returns(feedIteratorMock.Object);
+
+        var query = new SearchRoomsQuery(keyword: "  Phòng trọ giá rẻ  ");
+
+        // Act
+        await _repository.SearchAsync(query);
+
+        // Assert
+        Assert.That(capturedQueryDef, Is.Not.Null);
+        var parameters = capturedQueryDef!.GetQueryParameters();
+        Assert.That(parameters.Any(p => p.Name == "@keyword" && (string)p.Value == "Phòng trọ giá rẻ"), Is.True);
+    }
+
+    [Test]
+    public async Task SearchAsync_WhenKeywordIsWhitespaceOnly_ShouldNotBindKeywordParameter()
+    {
+        // Arrange
+        QueryDefinition? capturedQueryDef = null;
+
+        var feedResponseMock = new Mock<FeedResponse<int>>();
+        feedResponseMock.Setup(r => r.GetEnumerator()).Returns(new List<int> { 0 }.GetEnumerator());
+
+        var feedIteratorMock = new Mock<FeedIterator<int>>();
+        feedIteratorMock.SetupSequence(i => i.HasMoreResults)
+            .Returns(true)
+            .Returns(false);
+        feedIteratorMock.Setup(i => i.ReadNextAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(feedResponseMock.Object);
+
+        _containerMock
+            .Setup(c => c.GetItemQueryIterator<int>(
+                It.IsAny<QueryDefinition>(),
+                It.IsAny<string>(),
+                It.IsAny<QueryRequestOptions>()))
+            .Callback<QueryDefinition, string, QueryRequestOptions>((qd, _, _) =>
+            {
+                capturedQueryDef = qd;
+            })
+            .Returns(feedIteratorMock.Object);
+
+        var query = new SearchRoomsQuery(keyword: "   ");
+
+        // Act
+        await _repository.SearchAsync(query);
+
+        // Assert
+        Assert.That(capturedQueryDef, Is.Not.Null);
+        var parameters = capturedQueryDef!.GetQueryParameters();
+        Assert.That(parameters.Any(p => p.Name == "@keyword"), Is.False);
+        Assert.That(capturedQueryDef.QueryText, Does.Not.Contain("@keyword"));
     }
 }

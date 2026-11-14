@@ -216,7 +216,7 @@ public class CosmosRoomRepository : IRoomRepository
 
         if (!string.IsNullOrWhiteSpace(query.Keyword))
         {
-            queryDef = queryDef.WithParameter("@keyword", query.Keyword);
+            queryDef = queryDef.WithParameter("@keyword", query.Keyword.Trim());
         }
 
         if (query.Latitude.HasValue && query.Longitude.HasValue && query.RadiusInKm.HasValue)

@@ -24,6 +24,15 @@ public class SearchRoomsUseCase : ISearchRoomsUseCase
     {
         query ??= new SearchRoomsQuery();
 
+        if (!string.IsNullOrWhiteSpace(query.Keyword))
+        {
+            query = query with { Keyword = query.Keyword.Trim() };
+        }
+        else if (query.Keyword != null)
+        {
+            query = query with { Keyword = null };
+        }
+
         ValidateQuery(query);
 
         var (items, totalCount) = await _roomRepository.SearchAsync(query, cancellationToken);
