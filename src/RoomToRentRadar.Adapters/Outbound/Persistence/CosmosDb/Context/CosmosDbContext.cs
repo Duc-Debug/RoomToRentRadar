@@ -79,6 +79,17 @@ public sealed class CosmosDbContext : ICosmosDbContext
 
             if (options.IsEmulator)
             {
+                var isLocalEndpoint = Uri.TryCreate(options.AccountEndpoint, UriKind.Absolute, out var endpointUri) &&
+                                      (endpointUri.IsLoopback ||
+                                       string.Equals(endpointUri.Host, "localhost", StringComparison.OrdinalIgnoreCase));
+
+                if (!isLocalEndpoint)
+                {
+                    throw new InvalidOperationException(
+                        $"Cosmos DB 'IsEmulator' configuration is strictly allowed only for local loopback endpoints (e.g., localhost). " +
+                        $"Configured endpoint '{options.AccountEndpoint}' is not a local endpoint, and TLS certificate bypass has been blocked.");
+                }
+
                 clientOptions.ConnectionMode = ConnectionMode.Gateway;
                 clientOptions.HttpClientFactory = () => new HttpClient(new HttpClientHandler
                 {

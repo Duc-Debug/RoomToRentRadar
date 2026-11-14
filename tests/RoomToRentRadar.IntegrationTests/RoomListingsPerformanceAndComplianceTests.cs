@@ -239,16 +239,16 @@ public class CosmosRoomListingPerformanceIntegrationTests
             });
             _repository = new CosmosRoomListingRepository(_client, options);
 
-            // Seed test data: 30 available & verified rooms, 5 occupied, 5 unverified
-            for (var i = 1; i <= 30; i++)
+            // Seed test data: 60 available & verified rooms, 10 occupied, 10 unverified (realistic pagination dataset)
+            for (var i = 1; i <= 60; i++)
             {
-                var offset = (i % 10) * 0.002;
+                var offset = (i % 20) * 0.0015;
                 var room = new RoomListing(
                     $"room-perf-{i:D3}",
                     $"Phòng trọ hiệu năng #{i}",
                     "Mô tả phòng",
-                    new Money(1500000 + (i * 20000)),
-                    15.0 + (i % 10),
+                    new Money(1500000 + (i * 15000)),
+                    15.0 + (i % 12),
                     $"Địa chỉ #{i}",
                     new GeoLocation(21.5852 + offset, 105.8074 + offset),
                     ListingRoomStatus.Available,
@@ -258,7 +258,7 @@ public class CosmosRoomListingPerformanceIntegrationTests
                 await _repository.AddAsync(room);
             }
 
-            for (var j = 1; j <= 5; j++)
+            for (var j = 1; j <= 10; j++)
             {
                 await _repository.AddAsync(new RoomListing(
                     $"room-perf-occupied-{j}",
@@ -338,14 +338,14 @@ public class CosmosRoomListingPerformanceIntegrationTests
 
         Assert.Multiple(() =>
         {
-            // Verify record counts: exactly 30 available/verified (occupied and unverified filtered out by Cosmos SQL)
-            Assert.That(page1.TotalCount, Is.EqualTo(30), "TotalCount should only include Available + Verified rooms");
+            // Verify record counts: exactly 60 available/verified (occupied and unverified filtered out by Cosmos SQL)
+            Assert.That(page1.TotalCount, Is.EqualTo(60), "TotalCount should only include Available + Verified rooms");
             Assert.That(page1.Items, Has.Count.EqualTo(10), "Page size should match requested limit");
 
-            // Query duration SLA
+            // Query duration SLA (< 3000ms)
             Assert.That(queryDurationMs, Is.LessThan(3000), $"Cosmos DB query took {queryDurationMs}ms, exceeding 3s SLA");
 
-            // Measure Request Charge (RU): scoped to single partition /campusId, RU should be recorded and low (< 25 RU)
+            // Measure Request Charge (RU): scoped to single partition /campusId, RU should be recorded and low (< 50 RU)
             Assert.That(_repository.LastRequestCharge, Is.GreaterThan(0), "Request Charge (RU) should be tracked and greater than 0");
             Assert.That(_repository.LastRequestCharge, Is.LessThan(50), $"Request Charge ({_repository.LastRequestCharge} RU) should be minimal for single-partition query");
 
@@ -365,14 +365,27 @@ public class CosmosRoomListingPerformanceIntegrationTests
             sortBy: "price",
             descending: false);
 
+        // Page 3: multi-page sequential verification
+        var page3 = await _repository.GetAvailableVerifiedRoomsByCampusAsync(
+            CampusId,
+            _campusLocation,
+            page: 3,
+            pageSize: 10,
+            sortBy: "price",
+            descending: false);
+
         Assert.Multiple(() =>
         {
             Assert.That(page2.Items, Has.Count.EqualTo(10));
+            Assert.That(page3.Items, Has.Count.EqualTo(10));
+
             var page1Ids = page1.Items.Select(x => x.Id).ToHashSet();
-            foreach (var item in page2.Items)
-            {
-                Assert.That(page1Ids.Contains(item.Id), Is.False, $"Item '{item.Id}' from page 2 was also present in page 1 (pagination unstable)");
-            }
+            var page2Ids = page2.Items.Select(x => x.Id).ToHashSet();
+            var page3Ids = page3.Items.Select(x => x.Id).ToHashSet();
+
+            // Total distinct items across 3 pages should be exactly 30 (zero duplicates or omitted items)
+            var unionCount = page1Ids.Union(page2Ids).Union(page3Ids).Count();
+            Assert.That(unionCount, Is.EqualTo(30), "Pagination must yield completely distinct non-overlapping items across consecutive pages");
         });
     }
 }

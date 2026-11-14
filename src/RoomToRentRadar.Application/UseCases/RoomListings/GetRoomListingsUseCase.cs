@@ -11,7 +11,8 @@ using RoomToRentRadar.Domain.Enums;
 /// </summary>
 public sealed class GetRoomListingsUseCase : IGetRoomListingsUseCase
 {
-    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
+    // Reduced TTL from 10 minutes to 2 minutes for faster convergence with real-time updates
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(2);
 
     private static readonly HashSet<string> AllowedSortBy = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -46,10 +47,11 @@ public sealed class GetRoomListingsUseCase : IGetRoomListingsUseCase
     {
         ValidateQuery(query);
 
-        // AC3: Cache-aside pattern for read-heavy listing query
+        // AC3: Cache-aside pattern with campus versioning for instant invalidation
         var normalizedSortBy = string.IsNullOrWhiteSpace(query.SortBy) ? "distance" : query.SortBy.Trim().ToLowerInvariant();
         var normalizedSortOrder = string.IsNullOrWhiteSpace(query.SortOrder) ? "asc" : query.SortOrder.Trim().ToLowerInvariant();
-        var cacheKey = $"rooms:campus:{query.CampusId}:p{query.Page}:s{query.PageSize}:sort{normalizedSortBy}_{normalizedSortOrder}";
+        var campusVersion = await GetCampusCacheVersionAsync(query.CampusId, cancellationToken);
+        var cacheKey = $"rooms:campus:{query.CampusId}:v{campusVersion}:p{query.Page}:s{query.PageSize}:sort{normalizedSortBy}_{normalizedSortOrder}";
 
         var cachedResult = await _cacheService.GetAsync<PagedResult<RoomListingDto>>(cacheKey, cancellationToken);
         if (cachedResult is not null)
@@ -89,14 +91,52 @@ public sealed class GetRoomListingsUseCase : IGetRoomListingsUseCase
             ThumbnailUrl: listing.ThumbnailUrl,
             CampusId: listing.CampusId));
 
-        // AC1: Sort by distance from the selected campus by default
         var pageItems = dtos.ToList();
+
+        // Secondary deterministic tie-breaker for distance sort at application layer:
+        // Cosmos DB SQL forbids combining ST_DISTANCE with other fields in ORDER BY.
+        // Therefore, any duplicate distance items within a page are stably ordered by Id here.
+        if (normalizedSortBy == "distance")
+        {
+            pageItems = normalizedSortOrder == "desc"
+                ? pageItems.OrderByDescending(d => d.DistanceToCampusKm).ThenBy(d => d.Id).ToList()
+                : pageItems.OrderBy(d => d.DistanceToCampusKm).ThenBy(d => d.Id).ToList();
+        }
+
         var result = new PagedResult<RoomListingDto>(pageItems, query.Page, query.PageSize, listingsPage.TotalCount);
 
         // Store in cache
         await _cacheService.SetAsync(cacheKey, result, CacheTtl, cancellationToken);
 
         return result;
+    }
+
+    /// <summary>
+    /// Instantly invalidates all cached listing pages for a given campus by incrementing its version counter.
+    /// </summary>
+    public async Task InvalidateCacheAsync(string campusId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(campusId))
+        {
+            return;
+        }
+
+        var versionKey = $"rooms:campus:{campusId}:version";
+        var currentVersionStr = await _cacheService.GetAsync<string>(versionKey, cancellationToken);
+        var nextVersion = int.TryParse(currentVersionStr, out var v) ? v + 1 : 2;
+        await _cacheService.SetAsync(versionKey, nextVersion.ToString(), TimeSpan.FromDays(7), cancellationToken);
+    }
+
+    private async Task<string> GetCampusCacheVersionAsync(string campusId, CancellationToken cancellationToken)
+    {
+        var versionKey = $"rooms:campus:{campusId}:version";
+        var version = await _cacheService.GetAsync<string>(versionKey, cancellationToken);
+        if (string.IsNullOrEmpty(version))
+        {
+            version = "1";
+            await _cacheService.SetAsync(versionKey, version, TimeSpan.FromDays(7), cancellationToken);
+        }
+        return version;
     }
 
     private static void ValidateQuery(GetRoomListingsQuery query)

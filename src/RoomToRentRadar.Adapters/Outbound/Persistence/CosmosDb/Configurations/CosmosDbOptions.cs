@@ -31,4 +31,10 @@ public sealed class CosmosDbOptions
     public string ConnectionMode { get; set; } = "Direct";
 
     public bool IsEmulator { get; set; }
+
+    /// <summary>
+    /// Whether to automatically seed initial sample room data during startup.
+    /// Strictly defaults to false to prevent seeding test/demo data in production.
+    /// </summary>
+    public bool SeedSampleData { get; set; } = false;
 }

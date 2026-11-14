@@ -1,6 +1,7 @@
 namespace RoomToRentRadar.Adapters.Outbound.Persistence.CosmosDb;
 
 using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RoomToRentRadar.Adapters.Outbound.Persistence.CosmosDb.Configurations;
@@ -11,15 +12,18 @@ public sealed class CosmosDbInitializer
     private readonly CosmosClient _cosmosClient;
     private readonly CosmosDbOptions _settings;
     private readonly ILogger<CosmosDbInitializer> _logger;
+    private readonly IHostEnvironment? _environment;
 
     public CosmosDbInitializer(
         CosmosClient cosmosClient,
         IOptions<CosmosDbOptions> options,
-        ILogger<CosmosDbInitializer> logger)
+        ILogger<CosmosDbInitializer> logger,
+        IHostEnvironment? environment = null)
     {
         _cosmosClient = cosmosClient;
         _settings = options.Value;
         _logger = logger;
+        _environment = environment;
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -41,25 +45,31 @@ public sealed class CosmosDbInitializer
                 new ContainerProperties(_settings.ContainerName, "/campusId"),
                 cancellationToken: cancellationToken);
 
-            var partitionKeyPath = roomsContainerResponse.Resource.PartitionKeyPath;
+            var effectiveContainer = roomsContainerResponse.Container;
+            var effectiveProperties = roomsContainerResponse.Resource;
+            var partitionKeyPath = effectiveProperties.PartitionKeyPath;
+
             if (!string.Equals(partitionKeyPath, "/campusId", StringComparison.Ordinal))
             {
                 _logger.LogWarning(
-                    "Cosmos container '{ContainerName}' currently has partition key '{PartitionKeyPath}', but '/campusId' is required. " +
-                    "Cosmos DB cannot modify the partition key in-place. Initiating automated data migration...",
+                    "Cosmos container '{ContainerName}' currently uses legacy partition key '{PartitionKeyPath}' instead of required '/campusId'. " +
+                    "Cosmos DB does not allow in-place partition key changes. Initiating safe zero-data-loss migration...",
                     _settings.ContainerName,
                     partitionKeyPath);
 
-                roomsContainerResponse = await MigrateContainerToCampusIdPartitionAsync(
+                var migrationResult = await SafeMigrateToNewContainerAsync(
                     database,
-                    roomsContainerResponse.Container,
+                    effectiveContainer,
                     _settings.ContainerName,
                     cancellationToken);
+
+                effectiveContainer = migrationResult.Container;
+                effectiveProperties = migrationResult.Resource;
             }
 
-            await EnsureSpatialAndCompositeIndexesAsync(roomsContainerResponse.Container, roomsContainerResponse.Resource, cancellationToken);
+            await EnsureSpatialAndCompositeIndexesAsync(effectiveContainer, effectiveProperties, cancellationToken);
 
-            await SeedInitialDataAsync(campusesContainerResponse.Container, roomsContainerResponse.Container, cancellationToken);
+            await SeedInitialDataAsync(campusesContainerResponse.Container, effectiveContainer, cancellationToken);
 
             _logger.LogInformation("Cosmos DB initialization completed successfully.");
         }
@@ -70,56 +80,63 @@ public sealed class CosmosDbInitializer
         }
     }
 
-    private async Task<ContainerResponse> MigrateContainerToCampusIdPartitionAsync(
+    /// <summary>
+    /// Safely copies data in streaming batches to a new container partitioned by /campusId.
+    /// Crucially, the legacy container is NEVER deleted, preventing any data loss and enabling rollback.
+    /// </summary>
+    private async Task<ContainerResponse> SafeMigrateToNewContainerAsync(
         Database database,
-        Container oldContainer,
-        string containerName,
+        Container legacyContainer,
+        string legacyContainerName,
         CancellationToken cancellationToken)
     {
-        _logger.LogWarning("Beginning automated migration of container '{ContainerName}' to partition key '/campusId'...", containerName);
+        var targetContainerName = $"{legacyContainerName}_v2";
+        _logger.LogWarning(
+            "Creating target container '{TargetContainer}' with partition key '/campusId' (preserving legacy container '{LegacyContainer}')...",
+            targetContainerName,
+            legacyContainerName);
 
-        var existingDocs = new List<Newtonsoft.Json.Linq.JObject>();
+        var targetContainerProperties = new ContainerProperties(targetContainerName, "/campusId");
+        var targetContainerResponse = await database.CreateContainerIfNotExistsAsync(targetContainerProperties, cancellationToken: cancellationToken);
+        var targetContainer = targetContainerResponse.Container;
+
+        var totalMigrated = 0;
         try
         {
-            using var feedIterator = oldContainer.GetItemQueryIterator<Newtonsoft.Json.Linq.JObject>(new QueryDefinition("SELECT * FROM c"));
+            using var feedIterator = legacyContainer.GetItemQueryIterator<Newtonsoft.Json.Linq.JObject>(new QueryDefinition("SELECT * FROM c"));
             while (feedIterator.HasMoreResults)
             {
-                var feedResponse = await feedIterator.ReadNextAsync(cancellationToken);
-                existingDocs.AddRange(feedResponse);
+                var page = await feedIterator.ReadNextAsync(cancellationToken);
+                foreach (var doc in page)
+                {
+                    var campusId = doc["campusId"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(campusId))
+                    {
+                        campusId = "campus-ictu";
+                        doc["campusId"] = campusId;
+                    }
+
+                    await targetContainer.UpsertItemAsync(doc, new PartitionKey(campusId), cancellationToken: cancellationToken);
+                    totalMigrated++;
+                }
+
+                _logger.LogInformation("Migrated batch of {Count} items (total so far: {Total}).", page.Count, totalMigrated);
             }
-            _logger.LogInformation("Read {Count} existing documents from old container '{ContainerName}' for migration.", existingDocs.Count, containerName);
+
+            _logger.LogInformation(
+                "Safe migration completed successfully: {Total} documents copied from '{LegacyContainer}' to '{TargetContainer}'. " +
+                "The legacy container has been preserved intact for backup and rollback.",
+                totalMigrated,
+                legacyContainerName,
+                targetContainerName);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to read documents from old container '{ContainerName}' before migration.", containerName);
+            _logger.LogError(ex, "Error occurred during batch migration from '{LegacyContainer}' to '{TargetContainer}'. Legacy data remains safe.", legacyContainerName, targetContainerName);
             throw;
         }
 
-        _logger.LogInformation("Deleting container '{ContainerName}' with legacy partition key...", containerName);
-        await oldContainer.DeleteContainerAsync(cancellationToken: cancellationToken);
-
-        _logger.LogInformation("Recreating container '{ContainerName}' with partition key '/campusId'...", containerName);
-        var containerProperties = new ContainerProperties(containerName, "/campusId");
-        var newContainerResponse = await database.CreateContainerAsync(containerProperties, cancellationToken: cancellationToken);
-
-        if (existingDocs.Count > 0)
-        {
-            _logger.LogInformation("Restoring {Count} migrated documents into container '{ContainerName}'...", existingDocs.Count, containerName);
-            foreach (var doc in existingDocs)
-            {
-                var campusId = doc["campusId"]?.ToString();
-                if (string.IsNullOrWhiteSpace(campusId))
-                {
-                    campusId = "campus-ictu";
-                    doc["campusId"] = campusId;
-                }
-
-                await newContainerResponse.Container.UpsertItemAsync(doc, new PartitionKey(campusId), cancellationToken: cancellationToken);
-            }
-            _logger.LogInformation("Successfully restored all {Count} documents into container '{ContainerName}'.", existingDocs.Count, containerName);
-        }
-
-        return newContainerResponse;
+        return targetContainerResponse;
     }
 
     private static async Task EnsureSpatialAndCompositeIndexesAsync(Container container, ContainerProperties properties, CancellationToken cancellationToken)
@@ -202,7 +219,14 @@ public sealed class CosmosDbInitializer
             _logger.LogInformation("Seeded default campus: {CampusName}", ictu.Name);
         }
 
-        // 2. Seed Sample Rooms near ICTU if none exist
+        // 2. Seed Sample Rooms near ICTU if none exist (restricted to Development or explicit SeedSampleData opt-in)
+        var isDevelopment = _environment?.IsDevelopment() ?? false;
+        if (!_settings.SeedSampleData && !isDevelopment)
+        {
+            _logger.LogInformation("Skipping sample rooms seeding in non-development environment or when SeedSampleData is false.");
+            return;
+        }
+
         var countQuery = new QueryDefinition("SELECT VALUE COUNT(1) FROM c WHERE c.campusId = @campusId")
             .WithParameter("@campusId", ictuId);
 

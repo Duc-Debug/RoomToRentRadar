@@ -39,11 +39,27 @@ await using (var scope = app.Services.CreateAsyncScope())
     }
     catch (CosmosException ex)
     {
-        app.Logger.LogWarning(ex, "Could not initialize Cosmos DB at startup. Ensure Cosmos Emulator is running if working locally.");
+        if (app.Environment.IsDevelopment())
+        {
+            app.Logger.LogWarning(ex, "Could not initialize Cosmos DB at startup in Development. Ensure Cosmos Emulator is running if working locally.");
+        }
+        else
+        {
+            app.Logger.LogCritical(ex, "Cosmos DB initialization failed in non-development environment ({EnvironmentName}). Failing fast.", app.Environment.EnvironmentName);
+            throw;
+        }
     }
     catch (Exception ex)
     {
-        app.Logger.LogWarning(ex, "Cosmos DB initialization encountered an exception at startup: {Message}", ex.Message);
+        if (app.Environment.IsDevelopment())
+        {
+            app.Logger.LogWarning(ex, "Cosmos DB initialization encountered an exception at startup in Development: {Message}", ex.Message);
+        }
+        else
+        {
+            app.Logger.LogCritical(ex, "Cosmos DB initialization encountered a critical failure in non-development environment ({EnvironmentName}). Failing fast: {Message}", app.Environment.EnvironmentName, ex.Message);
+            throw;
+        }
     }
 }
 

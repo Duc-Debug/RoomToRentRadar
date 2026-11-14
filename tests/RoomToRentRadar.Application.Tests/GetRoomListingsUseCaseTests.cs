@@ -104,7 +104,7 @@ public class GetRoomListingsUseCaseTests
         };
         var cachedResult = new PagedResult<RoomListingDto>(cachedItems, 1, 20, 1);
 
-        var cacheKey = "rooms:campus:campus-ictu:p1:s20:sortdistance_asc";
+        var cacheKey = "rooms:campus:campus-ictu:v1:p1:s20:sortdistance_asc";
         await _cacheService.SetAsync(cacheKey, cachedResult);
 
         var query = new GetRoomListingsQuery("campus-ictu");
@@ -115,6 +115,50 @@ public class GetRoomListingsUseCaseTests
             Assert.That(result.Items, Has.Count.EqualTo(1));
             Assert.That(result.Items[0].Id, Is.EqualTo("room-cached"));
             Assert.That(_roomRepository.GetCallCount, Is.EqualTo(0));
+        });
+    }
+
+    [Test]
+    public async Task ExecuteAsync_WhenCacheInvalidated_ShouldFetchFreshDataFromRepository()
+    {
+        var room1 = CreateListing("room-fresh-1", new GeoLocation(21.5860, 105.8074), ListingRoomStatus.Available, VerificationStatus.Verified);
+        await _roomRepository.AddAsync(room1);
+
+        var query = new GetRoomListingsQuery("campus-ictu");
+
+        // First call populates cache
+        var result1 = await _useCase.ExecuteAsync(query);
+        Assert.That(_roomRepository.GetCallCount, Is.EqualTo(1));
+
+        // Second call hits cache (no new repo call)
+        var result2 = await _useCase.ExecuteAsync(query);
+        Assert.That(_roomRepository.GetCallCount, Is.EqualTo(1));
+
+        // Invalidate cache for this campus
+        await _useCase.InvalidateCacheAsync("campus-ictu");
+
+        // Third call must fetch fresh data from repository
+        var result3 = await _useCase.ExecuteAsync(query);
+        Assert.That(_roomRepository.GetCallCount, Is.EqualTo(2));
+    }
+
+    [Test]
+    public async Task ExecuteAsync_WhenDistancesAreEqual_ShouldTieBreakById()
+    {
+        // Two rooms at exact same coordinate/distance
+        var roomZ = CreateListing("room-Z", new GeoLocation(21.5860, 105.8074), ListingRoomStatus.Available, VerificationStatus.Verified);
+        var roomA = CreateListing("room-A", new GeoLocation(21.5860, 105.8074), ListingRoomStatus.Available, VerificationStatus.Verified);
+
+        await _roomRepository.AddAsync(roomZ);
+        await _roomRepository.AddAsync(roomA);
+
+        var query = new GetRoomListingsQuery("campus-ictu", SortBy: "distance", SortOrder: "asc");
+        var result = await _useCase.ExecuteAsync(query);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Items[0].Id, Is.EqualTo("room-A"));
+            Assert.That(result.Items[1].Id, Is.EqualTo("room-Z"));
         });
     }
 
